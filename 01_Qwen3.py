@@ -83,6 +83,7 @@ class Qwen3Model(nn.Module):
         # 扩展mask到[1, 1, query_len, key_value_len]，方便广播到每个batch和每个head
         mask = mask.unsqueeze(0).unsqueeze(0)
 
+        # i: 第i层
         for i, block in enumerate(self.trf_blocks):
             # prefill阶段，cache传进来的是空字典{}；decode阶段，cache里已经有每一层的KV Cache
             blk_cache = cache.get(i) if cache is not None else None
@@ -138,6 +139,7 @@ class TransformerBlock(nn.Module):
         return x, next_cache
 
 class FeedForward(nn.Module):
+    # 初始化
     def __init__(self, cfg):
         super().__init__()
         self.gate_proj = nn.Linear(cfg["hidden_size"], cfg["intermediate_size"], dtype=cfg["torch_dtype"], bias=False)
@@ -269,15 +271,17 @@ def compute_rope_params(head_dim, theta_base=10_000, context_length=4096, dtype=
     scales = theta_base ** exponents
 
     # 4. 取倒数，得到 inverse frequencies
+    # shape : (head_dim / 2 , )
     inv_freq = 1.0 / scales
 
 
     # 计算位置索引：[0,1,2,3,...,context_length-1] shape: (context_length,)
+    # positions代表的就是 token在序列当中所有可能的位置
     positions = torch.arange(context_length, dtype=dtype)
 
     # 计算每个位置的每组旋转的角度
-    # positions.unsqueeze(1): (context_length,1)
-    # inv_freq.unsqueeze(0): (1,head_dim // 2)
+    # positions.unsqueeze(1): (context_length,1) [[0],[1],[2],.... [context_length -1]]
+    # inv_freq.unsqueeze(0): (1,head_dim // 2) [[100_0000 ** (-0), 100_0000 ** (-2/head_dim),100_0000 ** (-4/head_dim), ... ]]
     # angles: (context_length, head_dim // 2)
     # angles[0,0]=序列中第0个位置处，第0组分量的旋转角度，对应的就是m * theta_i
     angles = positions.unsqueeze(1) * inv_freq.unsqueeze(0)  # Shape: (context_length, head_dim // 2)
@@ -470,26 +474,37 @@ def generate_text(input_ids,model:Qwen3Model,tokenizer:Qwen3Tokenizer,max_len:in
     
     # 每次调用时，重置一下current_pos位置的值
     model.reset_kv_cache()
+    # 整个自回归生成的过程当中，生成的token数量
     generated_token = 0
+    # 维护生成的所有的新的token
     final_output = input_ids.clone()
+    # 存放kv cache的一个字典
     kv_cache = {}
     
     with torch.no_grad():
         # 1、prefill阶段
         # output_logits: shape:[batch_size,seq_len,vocab_size]
+        # input_ids.shape: batch_size, seq_len 
         output_logits = model(input_ids,cache=kv_cache)
         
+        # 取最后一个token的logits
         logits = output_logits[:,-1,:]
+        # 进行softmax操作，获得概率分布
+        # probs.shape: batch_size,vocab_size
         probs = torch.softmax(logits,dim=-1)
+        # next_token_id.shape: batch_size, 表示每个样本，下一个token是什么
         next_token_id = torch.multinomial(probs,num_samples=1).squeeze(-1)
 
+        # 更新generated_token变量，
         generated_token +=1
 
         # 2、decode阶段
         
+        # next_input.shape: batch_size, 1
         next_input = next_token_id.unsqueeze(-1)
 
         final_output = torch.cat([final_output,next_input],dim=-1)
+        # 自回归生成的终止条件，其实是有两个： 1、小于最大长度，2、生成EOS token 
         while generated_token<max_len:
             # 当前KV_Cache就不是空字典了，当前这个dict中的键，就是不同的TransformerBlock的层，值就是这一层所对应的KV Cache
             output_logits =  model(next_input,kv_cache)
@@ -497,7 +512,7 @@ def generate_text(input_ids,model:Qwen3Model,tokenizer:Qwen3Tokenizer,max_len:in
             logits = output_logits[:,-1,:]
             probs = torch.softmax(logits,dim=-1)
             next_token_id = torch.multinomial(probs,num_samples=1).squeeze(-1)
-
+            # next_input.shape : batch_size, 1
             next_input = next_token_id.unsqueeze(-1)
 
             final_output = torch.cat([final_output,next_input],dim=-1)
