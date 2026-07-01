@@ -14,7 +14,7 @@ print('输入的prompt为：',prompt[:30])
 print("模型路径为：",model_name)
 
 tokenizer_name = tokenizer_name or model_name
-tokenizer = AutoTokenizer.from_pretrained(tokenizer_name,device_map="auto")
+tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
 inputs = tokenizer.apply_chat_template([{"role":"user","content":prompt}],tokenize=True,add_generation_prompt=True,return_tensors="pt",max_length=2048,enable_thinking=True)
 print("得到的inputs为：",inputs)
 input_ids = inputs["input_ids"].to("cuda")

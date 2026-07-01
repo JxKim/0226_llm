@@ -187,9 +187,6 @@ def compute_loss(chosen_log_prob, rejected_log_prob, reference_chosen_log_prob, 
 
     # 3、将对数概率加起来，除以token总数，得到平均loss，return loss就可以了
 
-
-from re import L
-
 from torch import detach_copy
 from transformers import AutoModelForCausalLM
 from torch.optim.adamw import AdamW
