@@ -1,23 +1,34 @@
 from transformers import AutoTokenizer
-tokenizer = AutoTokenizer.from_pretrained("model/Qwen3-0.6B-Base/")
+from transformers.models.qwen3 import Qwen3ForCausalLM
+
+tokenizer = AutoTokenizer.from_pretrained("finetuned/01_sft_demo")
 
 
 from typing import Dict,List
-def get_train_data(sft_config):
+def get_train_data(dpo_config):
     """
     加载数据，调用chat template方法，得到分词之后的input_ids；后面在train主循环当中会调用该方法，获取训练数据
     """
     from datasets import load_dataset
 
-    train_data = load_dataset("data/ultrachat_200k")["train_sft"]
-    result_list = []
-    for i in range(sft_config.train_data_size):
-        message_list:List = train_data[i]["messages"]
-        message_list.insert(0,{"role":"system","content":"you are a helpfule assistant"})
-        result: Dict[str, List]= tokenizer.apply_chat_template(message_list,tokenize=True,truncation=True,max_length =2500)
-        result_list.append(result["input_ids"])
+    train_data = load_dataset("data/ultrafeedback_binarized")["train_prefs"]
+    chosen_result_list = []
+    rejected_result_list = []
 
-    return result_list
+    for i in range(dpo_config.train_data_size):
+        chosen_message_list:List = train_data[i]["chosen"]
+        chosen_message_list.insert(0,{"role":"system","content":"you are a helpfule assistant"})
+
+        chosen_result: Dict[str, List]= tokenizer.apply_chat_template(chosen_message_list,tokenize=True,truncation=True,max_length =2500)
+        chosen_result_list.append(chosen_result["input_ids"])
+
+        rejected_message_list:List = train_data[i]["rejected"]
+        rejected_message_list.insert(0,{"role":"system","content":"you are a helpfule assistant"})
+
+        rejected_result: Dict[str, List]= tokenizer.apply_chat_template(rejected_message_list,tokenize=True,truncation=True,max_length =2500)
+        rejected_result_list.append(rejected_result["input_ids"])
+
+    return chosen_result_list,rejected_result_list
 
 
 from transformers import PreTrainedTokenizerFast
@@ -124,10 +135,9 @@ def _set_answer_masks(mask,user_ends,assistant_ends):
         last_answer_start = last_user_end + 3
         mask[last_answer_start:] = 1
 
-
-def compute_loss(output_logits,labels,assistant_mask):
+def _compute_log_prob(output_logits, labels, assistant_mask):
     """
-    SFT计算损失的函数
+    用于计算样本的对数概率
     args:
         output_logits: 模型前向传播得到的结果，shape: [batch_size, seq_len, vocab_size]
         labels: 真实答案标签，shape:[batch_size, seq_len]
@@ -144,14 +154,32 @@ def compute_loss(output_logits,labels,assistant_mask):
         dim=-1,
         index=labels.unsqueeze(-1)
         ).squeeze(-1)
-    
-    negative_label_log_probs = label_log_probs * (-1)
+
     
     # 做assistant answer 掩码
-    masked_label_log_probs = negative_label_log_probs * assistant_mask
+    masked_label_log_probs = label_log_probs * assistant_mask
 
-    # 当前批次的平均loss
-    loss = masked_label_log_probs.sum() / assistant_mask.sum()
+    # 对样本长度做归一化: 将每个样本的所有log_probs加起来，除以样本中，有效token的数量，就得到了归一化之后的对数概率
+    average_log_prob = masked_label_log_probs.sum(dim = -1) / assistant_mask.sum(dim = -1)
+
+    return average_log_prob
+
+def compute_loss(chosen_log_prob, rejected_log_prob, reference_chosen_log_prob, reference_rejected_log_prob, beta):
+    """
+    DPO计算损失的函数
+    args:
+        chosen_log_prob: 当前模型输出chosen的对数概率，shape: (batch_size,)
+        rejected_log_prob：当前模型输出rejected的对数概率，shape(batch_size,)
+        reference_chosen_log_prob: 参考模型输出chosen的对数概率，shape: (batch_size,)
+        reference_rejected_log_prob：参考模型输出rejected的对数概率，shape: (batch_size,)
+        beta: 用于控制模型区分chosen和rejected的强度
+    """
+    
+    margin = (chosen_log_prob - rejected_log_prob) - (reference_chosen_log_prob - reference_rejected_log_prob)
+    # loss.shape:(batch_size, )
+    loss =   -torch.nn.functional.logsigmoid( beta * margin)
+
+    loss = loss.sum() / len(loss)
 
     return loss
 
@@ -170,15 +198,16 @@ from torch.utils.tensorboard import SummaryWriter
 import numpy as np
 from tqdm import tqdm
 @dataclass
-class SFTConfig:
+class DPOConfig:
 
-    lr:float = 1e-5
+    lr:float = 1e-6
     batch_size:int = 3
     warmup_ratio:float = 0.1
     log_dir : str = "logs/01_sft_demo"
     log_iter:int = 100
-    save_dir : str = "finetuned/01_sft_demo"
+    save_dir : str = "finetuned/02_dpo_demo"
     train_data_size:int = 5000
+    beta:float = 0.1
 
 def cosine_lr_decay(batch,total_batch,lr,warmup_ratio):
     """
@@ -197,57 +226,90 @@ def cosine_lr_decay(batch,total_batch,lr,warmup_ratio):
 
 
 
-def train(sft_config:SFTConfig):
+def train(dpo_config:DPOConfig):
     # 1、准备模型，数据，优化器
-    model = AutoModelForCausalLM.from_pretrained("model/Qwen3-0.6B-Base/")
+    model = AutoModelForCausalLM.from_pretrained("finetuned/01_sft_demo")
+    ref_model = AutoModelForCausalLM.from_pretrained("finetuned/01_sft_demo")
     model.train()
+    ref_model.eval()
     model.to("cuda")
-    train_data:List[List] = get_train_data(sft_config)
-    optimizer = AdamW(model.parameters(),lr=sft_config.lr)
-    total_batch = (len(train_data) + sft_config.batch_size -1) // sft_config.batch_size
-    writer = SummaryWriter(log_dir=sft_config.log_dir)
+    ref_model.to("cuda")
+    chosen_train_data, rejected_train_data= get_train_data(dpo_config)
+    optimizer = AdamW(model.parameters(),lr=dpo_config.lr)
+    total_batch = (len(chosen_train_data) + dpo_config.batch_size -1) // dpo_config.batch_size
+    writer = SummaryWriter(log_dir=dpo_config.log_dir)
     total_loss_list = []
     progress_bar = tqdm(total=total_batch)
     for batch in range(total_batch):
 
-        # 1、准备张量，input_ids和labels
-        current_batch_data = train_data[batch * sft_config.batch_size : (batch+1) * sft_config.batch_size]
+        # 1、准备张量，chosen_input_ids和chosen_labels、chosen_assistant_mask, rejected_input_ids和rejected_labels,rejected_assistant_mask
+        current_chosen_batch_data = chosen_train_data[batch * dpo_config.batch_size : (batch+1) * dpo_config.batch_size]
 
-        current_batch_max_len = max([len(data) for data in current_batch_data])
+        current_chosen_max_len = max([len(data) for data in current_chosen_batch_data])
         
-        for data in current_batch_data:
-            padding_length = current_batch_max_len - len(data)
+        for data in current_chosen_batch_data:
+            padding_length = current_chosen_max_len - len(data)
             data.extend([tokenizer.pad_token_id] * padding_length)
 
         # shape: batch_size, seq_len
-        batch_data_tensor = torch.tensor(current_batch_data,dtype=torch.long).to("cuda")
-        input_ids = batch_data_tensor[:,:-1]
-        labels = batch_data_tensor[:,1:]
-        assistant_mask = create_answer_mask(input_ids=input_ids,tokenizer=tokenizer)
+        chosen_batch_data_tensor = torch.tensor(current_chosen_batch_data,dtype=torch.long).to("cuda")
+        chosen_input_ids = chosen_batch_data_tensor[:,:-1]
+        chosen_labels = chosen_batch_data_tensor[:,1:]
+        chosen_assistant_mask = create_answer_mask(input_ids=chosen_input_ids,tokenizer=tokenizer)
+
+
+        current_rjected_batch_data = rejected_train_data[batch * dpo_config.batch_size : (batch+1) * dpo_config.batch_size]
+
+        current_rejected_max_len = max([len(data) for data in current_rjected_batch_data])
+        
+        for data in current_rjected_batch_data:
+            padding_length = current_rejected_max_len - len(data)
+            data.extend([tokenizer.pad_token_id] * padding_length)
+
+        # shape: batch_size, seq_len
+        rejected_batch_data_tensor = torch.tensor(current_rjected_batch_data,dtype=torch.long).to("cuda")
+        rejected_input_ids = rejected_batch_data_tensor[:,:-1]
+        rejected_labels = rejected_batch_data_tensor[:,1:]
+        rejected_assistant_mask = create_answer_mask(input_ids=rejected_input_ids,tokenizer=tokenizer)
+
+
 
         #2、前向传播
-        output_logits = model(input_ids).logits
+        # logis.shape: batch_size, seq_len, vocab_size
+        chosen_output_logits = model(chosen_input_ids).logits
+        rejected_output_logits = model(rejected_input_ids).logits
+
+        with torch.no_grad():
+            reference_chosen_output_logits = ref_model(chosen_input_ids).logits
+            reference_rejected_output_logits = ref_model(rejected_input_ids).logits
+            
 
         # 3、计算损失，反向传播，算得梯度
         
-        loss = compute_loss(output_logits,labels,assistant_mask)
+        chosen_log_prob = _compute_log_prob(chosen_output_logits, chosen_labels,chosen_assistant_mask)
+        rejected_log_prob = _compute_log_prob(rejected_output_logits, rejected_labels,rejected_assistant_mask)
+
+        reference_chosen_log_prob = _compute_log_prob(reference_chosen_output_logits, chosen_labels,chosen_assistant_mask)
+        reference_rejected_log_prob = _compute_log_prob(reference_rejected_output_logits, rejected_labels,rejected_assistant_mask)
+
+        loss = compute_loss(chosen_log_prob,rejected_log_prob, reference_chosen_log_prob, reference_rejected_log_prob,dpo_config.beta)
         total_loss_list.append(loss.item())
         loss.backward()
 
         # 4、使用优化器更新参数
-        current_lr = cosine_lr_decay(batch,total_batch,sft_config.lr,sft_config.warmup_ratio)
+        current_lr = cosine_lr_decay(batch,total_batch,dpo_config.lr,dpo_config.warmup_ratio)
         optimizer.param_groups[0]["lr"] = current_lr
         optimizer.step()
         optimizer.zero_grad()
         writer.add_scalar("train/lr",scalar_value=current_lr, global_step=batch)
-        should_log = batch % sft_config.log_iter == 0 or batch== total_batch-1
+        should_log = batch % dpo_config.log_iter == 0 or batch== total_batch-1
         progress_bar.update(1)
         progress_bar.set_postfix(lr=f"{current_lr:.2e}",loss = f"{loss.item():.4f}")
         if should_log:
             """
             记录一下损失
             """
-            loss_list = total_loss_list[-sft_config.log_iter:]
+            loss_list = total_loss_list[-dpo_config.log_iter:]
             average_loss = sum(loss_list) / len(loss_list) 
             writer.add_scalar("train/loss",scalar_value=average_loss, global_step=batch)
 
@@ -261,9 +323,9 @@ def save_model_tokenizer(model, tokenizer,save_dir):
 
 
 if __name__ == "__main__":
-    sft_config = SFTConfig()
-    model,tokenizer = train(sft_config)
-    save_model_tokenizer(model,tokenizer,sft_config.save_dir)
+    dpo_config = DPOConfig()
+    model,tokenizer = train(dpo_config)
+    save_model_tokenizer(model,tokenizer,dpo_config.save_dir)
 
         
 
