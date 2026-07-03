@@ -1,7 +1,23 @@
+from peft import LoraConfig,get_peft_model
+
+
+from transformers import AutoModelForCausalLM, AutoTokenizer
+lora_config = LoraConfig(
+    r=16,
+    lora_alpha=16,
+    lora_dropout=0.05,
+    target_modules=["q_proj","v_proj",],
+    # target_modules="all-linear",
+    task_type="CAUSAL_LM"
+)
+model = AutoModelForCausalLM.from_pretrained("model/Qwen3-0.6B/")
+tokenizer = AutoTokenizer.from_pretrained("model/Qwen3-0.6B/")
+
+peft_model = get_peft_model(model=model,peft_config=lora_config)
+
+
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from datasets import load_dataset
-model = AutoModelForCausalLM.from_pretrained("model/Qwen3-0.6B")
-tokenizer = AutoTokenizer.from_pretrained("model/Qwen3-0.6B")
 # 1、加载数据集
 train_data = load_dataset("json",data_files={"train":"data/keywords_data_train.jsonl","test":"data/keywords_data_test.jsonl"})
 
@@ -30,7 +46,7 @@ mapped_train_data = train_data.map(convert_data_format,batched=True,remove_colum
 # 3、构造SFTConfig实例
 from trl.trainer.sft_config import SFTConfig
 import os
-os.environ["TENSORBOARD_LOGGING_DIR"] = "logs/04_trl_demo"
+os.environ["TENSORBOARD_LOGGING_DIR"] = "logs/05_peft_lora_demo"
 sft_config = SFTConfig(
     per_device_train_batch_size=4,
     gradient_accumulation_steps=8,
@@ -39,7 +55,8 @@ sft_config = SFTConfig(
     logging_strategy="steps",
     logging_steps=100,
     report_to="tensorboard",
-    learning_rate=3e-5,
+    # 注意：LoRA微调的学习率，一般会比全参微调的学习率更高，高一个数量级
+    learning_rate=3e-4,
     lr_scheduler_type="cosine",
     # warmup_ratio=0.1,
     warmup_steps=0.1,
@@ -51,7 +68,7 @@ sft_config = SFTConfig(
     save_strategy="steps",
     save_steps=200,
     save_total_limit=3,
-    output_dir="./finetuned/04_trl_demo",
+    output_dir="./finetuned/05_peft_lora_demo",
     bf16=True,
     gradient_checkpointing=True,
     activation_offloading=False,
@@ -63,7 +80,7 @@ sft_config = SFTConfig(
 # 4、构造一个SFTTrainer的实例
 from trl.trainer.sft_trainer import SFTTrainer
 trainer = SFTTrainer(
-    model=model,
+    model=peft_model,
     args=sft_config,
     train_dataset=mapped_train_data["train"],
     eval_dataset=mapped_train_data["test"],
@@ -71,4 +88,4 @@ trainer = SFTTrainer(
 )
 
 trainer.train()
-trainer.save_model("finetuned/04_trl_demo")
+trainer.save_model("finetuned/05_peft_lora_demo")
