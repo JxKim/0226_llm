@@ -4,7 +4,7 @@ from trl.trainer.sft_trainer import SFTTrainer
 from transformers import AutoTokenizer
 
 
-model = FastLanguageModel.from_pretrained(
+model,tokenizer = FastLanguageModel.from_pretrained(
     # 2、优化二：当我们仅传入模型在huggingface的model_id以及load_in_4bit/load_in_8bit等，unsloth会下载它自己量化好之后的模型
     model_name="./model/Qwen3-8B",
     load_in_4bit=True,
@@ -21,7 +21,6 @@ model = FastLanguageModel.get_peft_model(
     target_modules=["q_proj","v_proj"],
     lora_dropout=0.05,
 )
-tokenizer = AutoTokenizer.from_pretrained("model/Qwen3-8B/")
 
 from datasets import load_dataset
 train_data = load_dataset("json",data_files={"train":"data/psychology_data.jsonl"})
@@ -53,7 +52,7 @@ mapped_train_data = train_data.map(convert_data_format,batched=True,remove_colum
 
 from trl.trainer.sft_config import SFTConfig
 import os
-os.environ["TENSORBOARD_LOGGING_DIR"] = "logs/07_QLoRA_demo"
+os.environ["TENSORBOARD_LOGGING_DIR"] = "logs/08_Unsloth_demo"
 sft_config = SFTConfig(
     per_device_train_batch_size=4,
     gradient_accumulation_steps=8,
@@ -75,7 +74,7 @@ sft_config = SFTConfig(
     save_strategy="steps",
     save_steps=200,
     save_total_limit=3,
-    output_dir="./finetuned/07_QLoRA_demo",
+    output_dir="./finetuned/08_Unsloth_demo",
     bf16=True,
     gradient_checkpointing=True,
     activation_offloading=False,
@@ -104,7 +103,7 @@ trainer = train_on_responses_only(
 )
 
 trainer.train()
-trainer.save_model("finetuned/07_QLoRA_demo")
+trainer.save_model("finetuned/08_Unsloth_demo")
 
 # 优化点5：直接通过Unsloth的model的save_pretrained_merged方法，来合并并且保存模型和tokenizer
 model.save_pretrained_merged("./finetuned/Qwen3-8B-SFT-unsloth-merged", tokenizer, save_method="merged_16bit")
