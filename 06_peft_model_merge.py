@@ -1,18 +1,24 @@
+from transformers import AutoModelForCausalLM,AutoTokenizer
 from peft import PeftModel
-from transformers import AutoModelForCausalLM, AutoTokenizer
+import torch
+import argparse
+parser = argparse.ArgumentParser(description="Merge Lora Model")
+parser.add_argument("--base_model",type=str)
+parser.add_argument("--peft_model",type=str)
+parser.add_argument("--merge_model_name",type=str)
+args = parser.parse_args()
 
-# 1、加载基座模型
-model = AutoModelForCausalLM.from_pretrained("model/Qwen3-0.6B")
-# 注意：这里需要使用保存在checkpoint当中的tokenizer，而不是使用原始模型的tokenizer
-tokenizer = AutoTokenizer.from_pretrained("finetuned/05_peft_lora_demo/checkpoint-1000")
+base_model_name = args.base_model
+peft_model_name = args.peft_model
 
-
-# 2、记载适配器
-peft_model = PeftModel.from_pretrained(model=model,model_id="finetuned/05_peft_lora_demo/checkpoint-1000")
-
-
-# 3、将适配器和基座模型合并
-model = peft_model.merge_and_unload()
-
-model.save_pretrained("finetuned/05_peft_merged_test_2")
-tokenizer.save_pretrained("finetuned/05_peft_merged_test_2")
+merge_model_name = args.merge_model_name
+tokenizer = AutoTokenizer.from_pretrained(peft_model_name)
+# 加载基础模型
+base_model = AutoModelForCausalLM.from_pretrained(base_model_name,dtype = torch.float16,device_map="auto")
+# 加载适配器
+peft_model = PeftModel.from_pretrained(base_model,model_id=peft_model_name,dtype=torch.float16,device_map="auto")
+# 将适配器合并到基础模型，避免在推理时需要进行额外的计算量，从而导致延迟
+merged_model = peft_model.merge_and_unload()
+# 调用save_pretrained方法保存合并后的模型到本地
+merged_model.save_pretrained(merge_model_name)
+tokenizer.save_pretrained(merge_model_name)
