@@ -1,7 +1,7 @@
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from datasets import load_dataset
-model = AutoModelForCausalLM.from_pretrained("model/Qwen3-0.6B")
-tokenizer = AutoTokenizer.from_pretrained("model/Qwen3-0.6B")
+model = AutoModelForCausalLM.from_pretrained("model/Qwen3-8B")
+tokenizer = AutoTokenizer.from_pretrained("model/Qwen3-8B")
 # 1、加载数据集
 train_data = load_dataset("json",data_files={"train":"data/keywords_data_train.jsonl","test":"data/keywords_data_test.jsonl"})
 
@@ -30,7 +30,7 @@ mapped_train_data = train_data.map(convert_data_format,batched=True,remove_colum
 # 3、构造SFTConfig实例
 from trl.trainer.sft_config import SFTConfig
 import os
-os.environ["TENSORBOARD_LOGGING_DIR"] = "logs/04_trl_demo"
+os.environ["TENSORBOARD_LOGGING_DIR"] = "logs/09_accelerate"
 sft_config = SFTConfig(
     per_device_train_batch_size=4,
     gradient_accumulation_steps=8,
@@ -51,7 +51,7 @@ sft_config = SFTConfig(
     save_strategy="steps",
     save_steps=200,
     save_total_limit=3,
-    output_dir="./finetuned/04_trl_demo",
+    output_dir="./finetuned/09_accelerate",
     bf16=True,
     gradient_checkpointing=True,
     activation_offloading=False,
@@ -71,4 +71,4 @@ trainer = SFTTrainer(
 )
 
 trainer.train()
-trainer.save_model("finetuned/04_trl_demo")
+trainer.save_model("finetuned/09_accelerate")
